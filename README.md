@@ -82,7 +82,7 @@ adb devices
 ### 4. 运行
 
 1. 手机打开汽水音乐，进入看广告页面，**保持亮屏不锁屏**
-2. 双击 `start.bat`（或 `启动.bat`）
+2. 双击 `start.bat`
 3. 停止：窗口里按 `Ctrl + C`
 
 也可以手动运行：
@@ -109,8 +109,7 @@ adb devices
 qishui-auto/
 ├── qishui_auto.py      # 主脚本（配置在文件顶部）
 ├── requirements.txt    # Python 依赖
-├── start.bat           # Windows 启动器（推荐）
-├── 启动.bat            # 同 start.bat
+├── start.bat           # Windows 启动器
 ├── README.md
 └── debug_clicks/       # 运行后生成的点击标注截图（已 gitignore）
 ```
