@@ -28,16 +28,32 @@ except Exception:
     pass
 
 # ================== 配置区 ==================
-# 领奖目标（按优先级，先点靠前的）
-REWARD_TARGETS = ["领取奖励", "继续观看"]
+# 领奖/继续类目标（按优先级，先点靠前的）
+# 「继续互动」：直播/互动广告中途弹窗，不点会卡住倒计时
+REWARD_TARGETS = ["领取奖励", "继续观看", "继续互动"]
 # 关闭类目标：广告结束页右上角的「领取成功 ×」胶囊，点它才会关掉广告、弹出奖励弹窗
-CLOSE_TARGETS = ["领取成功", "退出不看了"]
+CLOSE_TARGETS = ["领取成功", "退出不看了", "坚持退出"]
 # 「xx秒后 / xx s 后进入直播间 [取消]」：文字需同时含倒计时和「进入直播间」，
 # 避免把普通横幅「点击进入直播间」也当成自动跳转
+# 已误入直播间时的 OCR 特征（命中 >=2 才判定，避免广告文案误触）
+LIVE_ROOM_MARKERS = ["加入了直播间", "说点什么", "本场点赞", "更多直播"]
 
 # 跳过目标（仅当广告本身允许跳过时才会出现）
 SKIP_TARGETS = ["跳过广告", "跳过", "关闭广告"]
 ENABLE_SKIP = True          # 提前点“跳过”有可能拿不到奖励，视情况关掉
+
+# 避免点到顶部微信等通知横幅后跳走
+APP_PACKAGE = "com.soda.music"
+# 误入这些包名时自动返回汽水音乐
+LEAVE_PACKAGES = {
+    "com.tencent.mm",          # 微信
+    "com.tencent.mobileqq",    # QQ
+    "com.tencent.wework",      # 企业微信
+    "com.android.systemui",    # 通知下拉（少见）
+}
+# 顶部通知带：相对高度；过宽文本默认当通知，禁止点击
+NOTIFY_Y_MAX = 0.12
+NOTIFY_WIDTH_MIN = 0.50
 
 USE_UIAUTOMATOR = False     # True / False / "auto"。默认关：它看不到弹窗等覆盖层，会抢占 OCR
 OCR_SCORE = 0.5             # OCR 置信度下限
@@ -56,13 +72,16 @@ UIA_MAX_FAIL = 3            # 连续失败几次后自动关闭 uiautomator
 TARGET_ROI = {
     "领取奖励": {"x": (0.20, 0.80), "y": (0.30, 0.78)},
     "继续观看": {"x": (0.20, 0.80), "y": (0.30, 0.78)},
-    "领取成功": {"x": (0.55, 1.00), "y": (0.00, 0.20)},
+    "继续互动": {"x": (0.20, 0.80), "y": (0.30, 0.78)},
+    # 顶部控件避开最上方通知条（约 0~4%），从 4% 起才允许点「领取成功/跳过」
+    "领取成功": {"x": (0.55, 1.00), "y": (0.04, 0.18)},
     "退出不看了": {"x": (0.00, 1.00), "y": (0.80, 1.00)},
-    "跳过广告": {"x": (0.55, 1.00), "y": (0.00, 0.20)},
-    "跳过":     {"x": (0.55, 1.00), "y": (0.00, 0.20)},
-    "关闭广告": {"x": (0.55, 1.00), "y": (0.00, 0.20)},
+    "坚持退出": {"x": (0.20, 0.80), "y": (0.55, 0.95)},
+    "跳过广告": {"x": (0.55, 1.00), "y": (0.04, 0.18)},
+    "跳过":     {"x": (0.55, 1.00), "y": (0.04, 0.18)},
+    "关闭广告": {"x": (0.55, 1.00), "y": (0.04, 0.18)},
 }
-CENTER_TARGETS = {"领取奖励", "继续观看"}
+CENTER_TARGETS = {"领取奖励", "继续观看", "继续互动"}
 # ===========================================
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -80,15 +99,20 @@ last_click = {"target": None, "x": -1, "y": -1, "ts": 0.0}
 
 
 # ------------------------- adb 基础 -------------------------
-def adb(args, binary=False, timeout=20):
-    """执行 adb 命令，失败/超时返回 None"""
+def adb(args, binary=False, timeout=20, check_err=False):
+    """执行 adb 命令，失败/超时返回 None。
+    check_err=True 时把 stderr 一并返回 (stdout, stderr)，便于发现红米拦截点击。"""
     try:
         r = subprocess.run(["adb"] + args, capture_output=True, timeout=timeout)
+        out = r.stdout if binary else r.stdout.decode("utf-8", "ignore")
+        err = r.stderr.decode("utf-8", "ignore") if r.stderr else ""
+        if check_err:
+            return out, err, r.returncode
         if r.returncode != 0:
             return None
-        return r.stdout if binary else r.stdout.decode("utf-8", "ignore")
+        return out
     except Exception:
-        return None
+        return (None, "exception", 1) if check_err else None
 
 
 def screen_size():
@@ -108,6 +132,81 @@ def set_screen_size(w, h):
     global screen_cache
     if w and h:
         screen_cache = (int(w), int(h))
+
+
+def foreground_package():
+    """读取当前前台应用包名；失败返回空字符串。"""
+    out = adb(["shell", "dumpsys", "window"], timeout=8) or ""
+    m = re.search(r"mCurrentFocus=Window\{[^ ]+\s+([a-zA-Z0-9._]+)/", out)
+    if not m:
+        m = re.search(r"mFocusedApp=.*?([a-zA-Z0-9._]+)/", out)
+    if not m:
+        out2 = adb(["shell", "dumpsys", "activity", "activities"], timeout=8) or ""
+        m = re.search(r"mResumedActivity:.*? ([a-zA-Z0-9._]+)/", out2)
+    return m.group(1) if m else ""
+
+
+def collapse_notifications():
+    """收起通知栏/顶部横幅，降低误点微信通知概率。"""
+    adb(["shell", "cmd", "statusbar", "collapse"], timeout=5)
+
+
+def return_to_qishui():
+    """用返回键或显式拉起汽水音乐，从微信等页面回到广告流程。"""
+    print("  >>> 检测到离开汽水音乐，尝试返回…")
+    collapse_notifications()
+    adb(["shell", "input", "keyevent", "4"])  # BACK
+    time.sleep(0.45)
+    pkg = foreground_package()
+    if pkg == APP_PACKAGE:
+        return True
+    # 再退一次（通知点进微信后有时要两下）
+    adb(["shell", "input", "keyevent", "4"])
+    time.sleep(0.35)
+    pkg = foreground_package()
+    if pkg == APP_PACKAGE:
+        return True
+    print(f"  >>> 仍在 {pkg or '未知'}，重新打开汽水音乐")
+    adb([
+        "shell", "am", "start",
+        "-a", "android.intent.action.MAIN",
+        "-c", "android.intent.category.LAUNCHER",
+        "-p", APP_PACKAGE,
+    ], timeout=8)
+    time.sleep(1.0)
+    return foreground_package() == APP_PACKAGE
+
+
+def ensure_in_qishui():
+    """若前台是微信/QQ 等（多半误点顶部通知），拉回汽水。
+    返回 True 表示本轮做了恢复、应跳过点击。广告跳转的抖音/浏览器不在此强制拉回。"""
+    pkg = foreground_package()
+    if not pkg or pkg == APP_PACKAGE:
+        return False
+    if pkg in LEAVE_PACKAGES:
+        print(f"⚠️  当前前台是 {pkg}（疑似误点通知），自动返回汽水音乐")
+        return_to_qishui()
+        return True
+    return False
+
+
+def is_notification_banner(node, sw, sh):
+    """顶部过宽文本视为通知横幅（微信消息等），禁止点击。"""
+    if len(node) < 6:
+        return False
+    label, cx, cy, x1, y1, x2, y2 = node[0], node[1], node[2], node[3], node[4], node[5], node[6]
+    text = label or ""
+    if any(k in text for k in ("微信", "WeChat", "QQ", "[微信]", "企业微信")):
+        return True
+    # 顶部宽横幅：通知中心样式，不是右上角小胶囊
+    width_ratio = (x2 - x1) / float(sw or 1)
+    if cy <= sh * NOTIFY_Y_MAX and width_ratio >= NOTIFY_WIDTH_MIN:
+        n = normalize_text(text)
+        # 广告控件例外：领取成功× / 跳过广告 等短胶囊
+        if "领取成功" in n or "跳过广告" in n or n in ("跳过", "关闭广告"):
+            return False
+        return True
+    return False
 
 
 # ------------------------- 文字匹配 -------------------------
@@ -274,7 +373,8 @@ def save_debug(screen, x, y, target, label):
 
 
 def do_click(x, y, target, label, source, screen=None):
-    """点击并抑制 3 秒内同一坐标的重复点击"""
+    """点击并抑制 3 秒内同一坐标的重复点击。
+    红米/小米若未开「USB调试（安全设置）」，input tap 会被系统拒绝，这里会明确报错。"""
     global click_seq
     now = time.time()
     if (target == last_click["target"]
@@ -287,7 +387,12 @@ def do_click(x, y, target, label, source, screen=None):
     last_click.update(target=target, x=x, y=y, ts=now)
     print(f"  >>> 点击 #{click_seq} [{datetime.now():%H:%M:%S}] "
           f"{target} <- 「{label}」 @({x},{y}) via {source}")
-    adb(["shell", "input", "tap", str(x), str(y)])
+    # 领取成功胶囊要偏右点「×」，只点文字中间在部分机型上关不掉广告
+    _, err, code = adb(["shell", "input", "tap", str(x), str(y)], check_err=True)
+    if code != 0 or (err and "SecurityException" in err):
+        print("❌ 点击被系统拦截（INJECT_EVENTS）。红米请打开：")
+        print("   设置 → 更多设置 → 开发者选项 → USB调试（安全设置）")
+        print("   打开后重新插线授权，再运行 start.bat")
     save_debug(screen, x, y, target, label)
     return True
 
@@ -296,8 +401,9 @@ def do_click(x, y, target, label, source, screen=None):
 LIVE_ENTER_RE = re.compile(r"\d+\s*[秒sSｓＳ]\s*后")
 
 
-def try_cancel_live_enter(nodes, source):
-    """检测到「4s后进入直播间」这类倒计时时，点「取消」拦下来，避免被自动带进直播间。"""
+def try_cancel_live_enter(nodes, source, screen=None):
+    """检测到「4s后进入直播间」这类倒计时时，点「取消」拦下来。
+    注意：若同屏已有「继续观看/领取奖励」，应由上层先点领奖，不要在这里抢点。"""
     if not nodes:
         return False
 
@@ -311,33 +417,27 @@ def try_cancel_live_enter(nodes, source):
     for n in nodes:
         if normalize_text(n[0]) == "取消":
             print(f"  >>> 拦截「进入直播间」，点取消 <- 「{n[0]}」 @({n[1]},{n[2]})")
-            do_click(n[1], n[2], "取消", n[0], source)
+            do_click(n[1], n[2], "取消", n[0], source, screen)
             return True
 
-    # 兜底：OCR 把「倒计时 + 取消」并成一段时，点该段右侧（取消在右边）
+    # 兜底：OCR 把「6s后进入直播间取消」并成一段时，点该段右侧「取消」
     for n in nodes:
-        lbl = normalize_text(n[0])
-        if "取消" in lbl and len(lbl) <= 12:
+        lbl = n[0]
+        if ("取消" in lbl) and is_countdown(lbl):
             x1, x2 = n[3], n[5]
-            tx = int(x2 - (x2 - x1) * 0.12)
+            tx = int(x2 - max(10, (x2 - x1) * 0.10))
             print(f"  >>> 拦截「进入直播间」，点取消(合并段右侧) <- 「{n[0]}」 @({tx},{n[2]})")
-            do_click(tx, n[2], "取消", n[0], source)
+            do_click(tx, n[2], "取消", n[0], source, screen)
             return True
 
     return False
 
 
-def match_and_click(nodes, source, screen=None):
-    """在节点里找目标并点击。命中返回目标字符串，否则 None"""
-    if not nodes:
+def find_and_click_targets(nodes, targets, source, screen=None):
+    """在给定目标列表里找可点项并点击；命中返回目标名，否则 None。"""
+    if not nodes or not targets:
         return None
-    # 「xx秒后进入直播间 [取消]」优先拦下，别被带进直播间
-    if try_cancel_live_enter(nodes, source):
-        return "取消"
     sw, sh = screen_size()
-    # 领奖优先，其次“领取成功 / 退出不看了”（关广告），最后才跳过
-    targets = REWARD_TARGETS + CLOSE_TARGETS + (SKIP_TARGETS if ENABLE_SKIP else [])
-
     for target in targets:
         cands = []
         for node in nodes:
@@ -345,6 +445,9 @@ def match_and_click(nodes, source, screen=None):
             if not text_match(label, target):
                 continue
             if not in_roi(cx, cy, sw, sh, target):
+                continue
+            # 过滤微信等顶部通知横幅，避免误点跳转
+            if is_notification_banner(node, sw, sh):
                 continue
             cands.append(node)
         if not cands:
@@ -354,14 +457,80 @@ def match_and_click(nodes, source, screen=None):
             midx, midy = sw * 0.5, sh * 0.5
             cands.sort(key=lambda c: (c[1] - midx) ** 2 + (c[2] - midy) ** 2)
         else:
-            cands.sort(key=lambda c: (-c[1], c[2]))  # 偏右上
+            cands.sort(key=lambda c: (-c[1], c[2]))
 
-        label, cx, cy = cands[0][0], cands[0][1], cands[0][2]
-        # 「领取成功 ×」是同一个胶囊按钮，整个都能点，直接点中心最稳
+        node = cands[0]
+        label, cx, cy = node[0], node[1], node[2]
+        if target == "领取成功" and len(node) >= 6:
+            x1, x2 = node[3], node[5]
+            cx = int(x2 - max(6, (x2 - x1) * 0.08))
+            cx = min(sw - 8, cx + max(12, int((x2 - x1) * 0.15)))
         do_click(cx, cy, target, label, source, screen)
         return target
-
     return None
+
+
+def is_live_room(nodes):
+    """是否已误入直播间（抖音等）。需命中多个特征，避免广告页「直播间观看时长」误判。"""
+    if not nodes:
+        return False
+    labels = [n[0] for n in nodes]
+    hit = 0
+    for marker in LIVE_ROOM_MARKERS:
+        if any(marker in lbl for lbl in labels):
+            hit += 1
+    return hit >= 2
+
+
+def exit_live_room(nodes, source, screen=None):
+    """退出直播间：优先点文案「退出不看了」，否则点右上角 ×，再按返回键兜底。"""
+    sw, sh = screen_size()
+    # 精选直播面板上的「退出不看了」
+    for n in nodes or []:
+        if text_match(n[0], "退出不看了") and in_roi(n[1], n[2], sw, sh, "退出不看了"):
+            do_click(n[1], n[2], "退出不看了", n[0], source, screen)
+            return "退出不看了"
+
+    # 直播间右上角关闭 ×（图标无字；K60 实测约 1380,200 @1440x3200）
+    x = int(sw * 0.958)
+    y = int(sh * 0.0625)
+    print(f"  >>> 检测到直播间，点右上角关闭 @({x},{y})")
+    do_click(x, y, "退出直播间", "右上角×", source, screen)
+    time.sleep(0.4)
+    # 若仍像直播间，再偏右上补点一次 + 返回键
+    print("  >>> 直播间兜底：补点并按返回键")
+    adb(["shell", "input", "tap", str(min(sw - 20, x + 30)), str(max(80, y - 20))])
+    time.sleep(0.2)
+    adb(["shell", "input", "keyevent", "4"])
+    return "退出直播间"
+
+
+def match_and_click(nodes, source, screen=None):
+    """点击优先级：
+    1) 领取奖励 / 继续观看 / 继续互动（主流程，绝不能被底部「取消进直播间」抢走）
+    2) 取消「Ns后进入直播间」（没有领奖按钮时才拦）
+    3) 已进直播间则退出
+    4) 领取成功 / 退出不看了 / 跳过
+    """
+    if not nodes:
+        return None
+
+    # 1. 领奖/继续最优先
+    hit = find_and_click_targets(nodes, REWARD_TARGETS, source, screen)
+    if hit:
+        return hit
+
+    # 2. 没有「继续观看」等时，再拦自动进直播间
+    if try_cancel_live_enter(nodes, source, screen):
+        return "取消"
+
+    # 3. 已经进了直播间：退出
+    if is_live_room(nodes):
+        return exit_live_room(nodes, source, screen)
+
+    # 4. 关广告 / 跳过
+    targets = CLOSE_TARGETS + (SKIP_TARGETS if ENABLE_SKIP else [])
+    return find_and_click_targets(nodes, targets, source, screen)
 
 
 # ------------------------- 静音 -------------------------
@@ -430,14 +599,33 @@ def main():
         print("❌ 没有可用通道：请 pip install -r requirements.txt")
         return
 
+    # 启动时探测能否模拟点击（红米默认常拦截）
+    _, tap_err, tap_code = adb(
+        ["shell", "input", "tap", str(max(1, sw - 2)), "1"], check_err=True
+    )
+    if tap_code != 0 or (tap_err and "SecurityException" in tap_err):
+        print("❌ 当前无法模拟点击：红米拦截了 ADB 点击")
+        print("   请打开：设置 → 更多设置 → 开发者选项 → USB调试（安全设置）")
+        print("   打开后拔掉数据线再插上，手机点「允许」，然后重新运行脚本")
+        return
+
     mute_on_start()
     idle = 0
     try:
         while True:
             clicked = False
 
+            # 误点顶部微信通知后会跳走：每轮先检查前台，不在汽水则拉回
+            if ensure_in_qishui():
+                idle = 0
+                time.sleep(0.6)
+                continue
+
             # 主通道：OCR。奖励弹窗等覆盖层 uiautomator 抓不到，必须靠 OCR
             if use_ocr:
+                # 先收起通知栏，减少点到横幅
+                if idle % 8 == 0:
+                    collapse_notifications()
                 screen = screenshot()
                 if screen is not None and match_and_click(ocr_nodes(screen), "ocr", screen):
                     clicked = True

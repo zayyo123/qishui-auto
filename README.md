@@ -1,84 +1,189 @@
-# 汽水音乐自动看广告
+# 汽水音乐自动看广告（Android）
 
-适用 app 版本：`19.1.0`（文案随版本可能变化，失效时改脚本顶部配置区）
+基于 **ADB 截图 + RapidOCR** 的纯 UI 自动化脚本：自动点击「领取奖励 / 继续观看 / 继续互动 / 领取成功」等按钮，循环看广告领取免费听时长。
 
-纯 UI 自动化：只点击界面上真实存在的按钮，**不修改 App、不伪造广告观看进度、不加速播放**。
-广告时长不会缩短，脚本只是替你点“领取奖励 / 继续观看 / 跳过”。
+> 本仓库基于 [cvabm/qishui](https://github.com/cvabm/qishui) 改进，补充了红米点击权限检测、直播间退出、防误点微信通知、点击优先级修正等。
+
+**适用场景**：Android 手机 + Windows 电脑（USB 调试）  
+**参考 App 版本**：汽水音乐 `19.1.0`（文案随版本变化时，改 `qishui_auto.py` 顶部配置即可）
+
+---
+
+## 功能
+
+- 自动点 **领取奖励 / 继续观看 / 继续互动**
+- 广告结束后点右上角 **领取成功 ×**（偏右点 ×，更稳）
+- 同屏有领奖按钮时，**优先领奖**，不会被底部「Ns后进入直播间取消」抢走
+- 没有领奖按钮时，拦截 **自动进入直播间**
+- 已误入直播间时：点右上角关闭 ×，必要时按返回键退出
+- 防止误点顶部 **微信/QQ 通知**：过滤横幅、收起通知栏；若已跳进微信会自动返回汽水音乐
+- 启动时检测 ADB 模拟点击是否被系统拦截（红米常见问题）
+
+脚本**不会**：改包、加速广告、伪造观看进度。广告该播多久仍播多久，只替你点按钮。
+
+---
 
 ## 原理
 
 | 通道 | 做法 | 说明 |
 |---|---|---|
-| 主通道 | `adb exec-out screencap` + RapidOCR | 视频广告是持续渲染的 SurfaceView，`uiautomator` 等不到 idle，实测必失败，所以 OCR 才是主通道 |
-| 可选 | `adb shell uiautomator dump` | 部分设备/静态页可用，启动自动探测；连续失败 3 次自动关闭 |
-| 附加 | `input keyevent 164` | 会话期间静音，退出恢复原音量 |
+| 主通道 | `adb exec-out screencap` + RapidOCR | 视频广告是持续渲染的 SurfaceView，`uiautomator` 等不到 idle，实测必失败 |
+| 可选 | `adb shell uiautomator dump` | 默认关闭；读不到奖励弹窗覆盖层，容易误点 |
+| 附加 | 前台包名检测 / 返回键 / 收起通知栏 | 防误进微信、退出直播间 |
 
-实测本机：`screencap` 约 0.5～0.9s，OCR 约 0.7s，一轮约 1.5s。
+---
 
-## 完整广告流程（脚本按这个点）
+## 环境要求
 
-1. 奖励弹窗：`再看N个视频得 今日/明日免费听` → 点绿色 **【领取奖励】**（居中）
-2. 广告播放：顶部倒计时 `15秒后可领取奖励` → 到点变 **`领取成功 ×`**
-3. 点 **`领取成功 ×`**（整个胶囊都能点，脚本点中心）→ 广告立刻关闭
-4. 回到第 1 步，循环到拿够免费听时长
+| 项目 | 要求 |
+|---|---|
+| 系统 | Windows 10/11（脚本含 `.bat` 启动器） |
+| Python | **3.10 ~ 3.12**（3.14 可能装不上 `onnxruntime`） |
+| ADB | [platform-tools](https://developer.android.com/tools/releases/platform-tools) 并加入 PATH |
+| 手机 | Android，开启 USB 调试；**红米/小米必须再开「USB 调试（安全设置）」** |
+| App | 汽水音乐，先手动进入「看广告」页面 |
 
-优先级：`取消（拦截进入直播间）` > `领取奖励/继续观看` > `领取成功 / 退出不看了` > `跳过`。
-弹窗和广告结束页同时可见时，**先点「领取奖励」**，不会去点背后那个「领取成功」。
+---
 
-## 直播类广告
+## 快速开始
 
-- 出现 `4s后进入直播间 [取消]` / `xx秒后进入直播间` → 点 **取消**，不被自动带进直播间
-  （兼容 `4s` / `4秒` / `4S` 三种写法；普通横幅「点击进入直播间」不含倒计时，不会误触）
-- 已经被带进直播间、弹出「为你精选以下直播」面板 → 点 **退出不看了**
-- 直播广告结束页同样有 `领取成功 ×` → 点它关闭
-- 优惠券弹窗（`恭喜您获得一张惊喜券`）不会去点「开心收下」，用返回键或它自己的 × 关掉
+### 1. 克隆仓库
 
-## 使用
-
-1. 安装 Python 3.10+（勾选 Add to PATH），安装 ADB（platform-tools）并加入 PATH
-2. 手机开启 **USB 调试**，连电脑，确认 `adb devices` 能看到设备
-3. 手机**保持亮屏不锁屏**（锁屏后截到的是锁屏界面，脚本空转）
-4. 手机打开汽水音乐，进入看广告页面
-5. 双击 `启动.bat`
-6. 停止：窗口里按 `Ctrl + C`（会自动恢复音量）
-
-## 依赖
-
-```
-pip install -r requirements.txt
+```bash
+git clone https://github.com/zayyo123/qishui-auto.git
+cd qishui-auto
 ```
 
-`opencv-python` / `numpy` / `rapidocr-onnxruntime`，缺一不可（OCR 是主通道）。
-Python 3.14 目前可能没有 `onnxruntime` 轮子，装不上就换 3.10～3.12。
+### 2. 安装依赖
+
+```bash
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+```
+
+依赖：`opencv-python`、`numpy`、`rapidocr-onnxruntime`（缺一不可）。
+
+### 3. 手机设置（重要）
+
+1. **设置 → 我的设备 → 全部参数** → 连续点「OS 版本 / MIUI 版本」7 次，开启开发者模式  
+2. **设置 → 更多设置 → 开发者选项**，打开：
+   - **USB 调试**
+   - **USB 调试（安全设置）**（允许通过 USB 调试修改权限或**模拟点击**）← 红米必开，否则脚本“点了没反应”
+3. 用数据线连接电脑，通知栏 USB 模式选 **传输文件**
+4. 手机弹出「允许 USB 调试」→ 勾选始终允许
+5. 电脑验证：
+
+```bash
+adb devices
+```
+
+应显示 `xxxxxx    device`。若是 `unauthorized`，在手机上点允许。
+
+### 4. 运行
+
+1. 手机打开汽水音乐，进入看广告页面，**保持亮屏不锁屏**
+2. 双击 `start.bat`（或 `启动.bat`）
+3. 停止：窗口里按 `Ctrl + C`
+
+也可以手动运行：
+
+```bash
+.venv\Scripts\python.exe qishui_auto.py
+```
+
+---
+
+## 点击优先级（当前逻辑）
+
+1. **领取奖励 / 继续观看 / 继续互动**（主流程，最高优先）  
+2. 取消「Ns后进入直播间」（仅当没有上面的领奖按钮时）  
+3. 已进入直播间 → 关闭退出  
+4. **领取成功 / 退出不看了 / 坚持退出**  
+5. 跳过广告（可配置关闭）
+
+---
+
+## 项目结构
+
+```text
+qishui-auto/
+├── qishui_auto.py      # 主脚本（配置在文件顶部）
+├── requirements.txt    # Python 依赖
+├── start.bat           # Windows 启动器（推荐）
+├── 启动.bat            # 同 start.bat
+├── README.md
+└── debug_clicks/       # 运行后生成的点击标注截图（已 gitignore）
+```
+
+---
 
 ## 常用配置（`qishui_auto.py` 顶部）
 
 | 配置 | 作用 |
 |---|---|
-| `REWARD_TARGETS` | 领奖按钮文字，如“领取奖励”“继续观看” |
-| `CLOSE_TARGETS` | 广告结束页的「领取成功 ×」胶囊 + 直播退出面板的「退出不看了」 |
-| `SKIP_TARGETS` / `ENABLE_SKIP` | 是否自动点“跳过”；提前跳过可能拿不到奖励，谨慎 |
-| `POLL_INTERVAL` | 每轮间隔 |
-| `CLICK_COOLDOWN` | 点击后冷却，防止连点 |
-| `MUTE_ON_START` | 启动即静音，退出恢复 |
-| `TARGET_ROI` | 各目标允许点击的区域，防误点 |
-| `USE_UIAUTOMATOR` | 默认 `False`。开启后只作兜底：它读不到奖励弹窗，会抢在 OCR 前误点「领取成功」 |
+| `REWARD_TARGETS` | 领奖/继续按钮文案 |
+| `CLOSE_TARGETS` | 「领取成功」「退出不看了」「坚持退出」 |
+| `SKIP_TARGETS` / `ENABLE_SKIP` | 是否自动点跳过（提前跳过可能没奖励） |
+| `LEAVE_PACKAGES` | 误入后自动拉回的包名（微信/QQ 等） |
+| `APP_PACKAGE` | 汽水音乐包名，默认 `com.soda.music` |
+| `TARGET_ROI` | 各按钮允许点击的屏幕区域，防误点 |
+| `POLL_INTERVAL` / `CLICK_COOLDOWN` | 轮询间隔 / 点击冷却 |
+| `MUTE_ON_START` | 启动是否静音（默认关） |
+| `USE_UIAUTOMATOR` | 默认 `False`，不要随便开 |
+| `SAVE_CLICK_DEBUG` | 是否保存点击标注图到 `debug_clicks/` |
 
-## 踩过的坑（改代码前先看）
+App 升级后按钮文案变了：把新文案加进对应 `*_TARGETS` 即可。
 
-- **分辨率**：`wm size` 会同时报 `Physical size`（1440×3200）和 `Override size`（1080×2400）。
-  `screencap` 和 `input tap` 用的是 **Override（逻辑分辨率）**，脚本取最后一个匹配值，别改回第一个。
-- **uiautomator 不可用**：本机报 `ERROR: could not get idle state`，每次卡 11s。视频广告永远等不到
-  idle，所以别把它当主通道。
-- **音量命令**：本机没有 `/system/bin/media`，`cmd media_session volume --set` 也不生效；
-  只有 `input keyevent 164`（静音切换）可用。
-- **uiautomator 会抢占 OCR**：它只能读到广告结束页的「领取成功，关闭，按钮」，读不到奖励弹窗
-  （弹窗是覆盖层，不在它的活动窗口里）。若把它放在 OCR 前面，就会一直点「领取成功」而不点
-  「领取奖励」，卡死循环。所以 **OCR 是主通道，`USE_UIAUTOMATOR` 默认关闭**。
-- **领奖优先于跳过**：两者同时出现时先点“领取奖励”，否则“跳过”会把奖励点没。
+---
+
+## 红米 / 小米必看
+
+脚本日志若出现：
+
+```text
+当前无法模拟点击：红米拦截了 ADB 点击
+```
+
+或日志里狂刷「点击 #N 领取奖励」但手机完全不动，说明 **没有 INJECT_EVENTS 权限**：
+
+1. 打开 **USB 调试（安全设置）**
+2. 关闭再打开「USB 调试」
+3. 拔掉数据线再插上，重新授权
+4. 仍不行则 **重启手机** 后再连
+
+验证点击是否通：
+
+```bash
+adb shell input tap 500 500
+```
+
+无报错且手机有反应即正常。若报 `SecurityException: INJECT_EVENTS`，权限仍未生效。
+
+---
 
 ## 排错
 
-- `截图失败 / 等待中…` → 检查 `adb devices` 是否在线、手机是否锁屏
-- 一直不点 → App 升级后文案变了，改 `REWARD_TARGETS`
-- 点错位置 → 看 `debug_clicks/` 里的标注截图，调整 `TARGET_ROI`
+| 现象 | 处理 |
+|---|---|
+| `adb devices` 空 | 驱动/线材/USB 模式；红米可装小米手机助手驱动 |
+| 截图失败 / 一直等待 | 检查是否锁屏、`adb devices` 是否在线 |
+| 识别到了但不点 | 开「USB 调试（安全设置）」 |
+| 一直点「取消进直播间」不点「继续观看」 | 请使用本仓库最新脚本（已修正优先级） |
+| 误进微信 | 已加防通知；仍发生时看是否点到了通知横幅 |
+| 点错位置 | 查看 `debug_clicks/` 标注图，调整 `TARGET_ROI` |
+| 文案识别不到 | App 升级后改 `REWARD_TARGETS` 等配置 |
+
+---
+
+## 注意事项
+
+1. 仅供学习交流；请遵守 App 用户协议与当地法规。  
+2. 每日广告额度有限，额度用完后不要空跑。  
+3. 不要提交 `.venv/`、`debug_clicks/`、手机截图等本地文件。  
+4. 分辨率：`wm size` 可能同时有 Physical / Override；脚本以截图实际像素为准。
+
+---
+
+## 致谢
+
+- 原始项目：[cvabm/qishui](https://github.com/cvabm/qishui)

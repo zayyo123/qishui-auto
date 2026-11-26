@@ -1,9 +1,13 @@
 debug_clicks/
 __pycache__/
+.venv/
+venv/
 *.pyc
 *.bak
+_tap_*.txt
 
 # 调试截图（不提交）
 *.png
 *.jpg
 *.jpeg
+.DS_Store
